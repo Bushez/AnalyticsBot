@@ -1,0 +1,29 @@
+[project]
+name = "analyticsbot"
+version = "0.1.0"
+description = "Collect Telegram post statistics once after 24 hours into Google Sheets"
+requires-python = ">=3.11"
+dependencies = [
+    "Telethon>=1.43,<2",
+    "google-api-python-client>=2.150,<3",
+    "google-auth>=2.35,<3",
+    "google-auth-httplib2>=0.2,<1",
+    "httplib2>=0.22,<1",
+    "python-dotenv>=1.0,<2",
+    "PyYAML>=6.0,<7",
+    "qrcode>=7.4,<9",
+    "tzdata>=2024.1",
+]
+
+[project.scripts]
+analyticsbot = "analyticsbot.main:main"
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7,<7", "pyinstaller>=6.10,<7"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["analyticsbot*"]

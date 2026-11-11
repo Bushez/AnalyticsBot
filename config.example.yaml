@@ -1,0 +1,25 @@
+poll_seconds: 60
+retry_seconds: 300
+initial_lookback_hours: 48
+
+channels:
+  - source: "@example_channel"
+    sheet:
+      spreadsheet_id: "YOUR_EXISTING_SPREADSHEET_ID"
+      worksheet: "Статистика"
+      start_row: 2
+      timezone: Europe/Moscow
+      columns:
+        published_at: A
+        post_title: B
+        views: C
+        reactions: D
+        forwards: E
+        comments: F
+        subscribers: G
+        er: H
+        err: I
+        post_id: J
+        collected_at: K
+        age_hours: L
+        post_key: M
