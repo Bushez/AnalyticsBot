@@ -19,3 +19,14 @@ gui-build/
 gui-dist/
 gui-build-themed/
 gui-dist-themed/
+gui-build-setup/
+gui-dist-setup/
+gui-build-wizard/
+gui-dist-wizard/
+gui-build-help/
+gui-dist-help/
+gui-build-connect/
+gui-dist-connect/
+gui-build-macos/
+gui-dist-macos/
+AnalyticsBot-macOS-source.zip

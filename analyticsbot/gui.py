@@ -1,28 +1,23 @@
-import json
 import logging
 import os
-import shutil
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-                               QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFormLayout,
+                               QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+                               QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSpinBox, QStackedWidget, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
-from google.oauth2.service_account import Credentials
-
-from .gui_config import DEFAULT_COLUMNS, channel_source, data_dir, import_cli, load_settings, runtime_config, save_settings, spreadsheet_id
-from .gui_workers import GoogleWorker, ServiceWorker, TelegramWorker, friendly_error
-from .sheets import HEADERS
+from .gui_config import DEFAULT_COLUMNS, data_dir, load_settings, runtime_config, save_settings
+from .gui_workers import ServiceWorker, friendly_error
 
 
 STYLE = """
-QWidget { background: #101011; color: #f7f8f8; font-family: 'Segoe UI'; font-size: 10pt; }
+QWidget { background: #101011; color: #f7f8f8; font-family: 'Segoe UI', '.AppleSystemUIFont'; font-size: 10pt; }
 QLabel { background: transparent; }
 QMainWindow, QDialog { background: #101011; }
 QFrame#sidebar { background: #0f1011; border-right: 1px solid #23252a; }
@@ -52,6 +47,8 @@ QHeaderView::section { background: #18191a; color: #8a8f98; border: none; border
 QTableWidget { gridline-color: #23252a; }
 QTableWidget::item { padding: 4px; }
 QCheckBox { spacing: 8px; }
+QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #62666d; border-radius: 3px; background: #141516; }
+QCheckBox::indicator:checked { background: #5e6ad2; border-color: #828fff; }
 QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }
 QScrollBar:vertical { background: #101011; width: 9px; margin: 2px; }
 QScrollBar::handle:vertical { background: #3e3e44; border-radius: 3px; min-height: 24px; }
@@ -59,6 +56,10 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QMenu { background: #18191a; border: 1px solid #34343a; padding: 4px; }
 QMenu::item { padding: 6px 20px; border-radius: 4px; }
 QMenu::item:selected { background: #34343a; }
+QToolButton { color: #d0d6e0; background: transparent; border: none; padding: 5px 0; text-align: left; }
+QToolButton:hover { color: #f7f8f8; }
+QProgressBar { background: #23252a; border: none; border-radius: 2px; }
+QProgressBar::chunk { background: #5e6ad2; border-radius: 2px; }
 """
 
 
@@ -138,72 +139,40 @@ def windows_autostart(enabled=None):
 class ChannelDialog(QDialog):
     def __init__(self, parent, channel=None):
         super().__init__(parent)
+        from .gui_setup import ChannelPanel
         self.setWindowTitle("Настройки канала")
-        self.resize(580, 620)
-        item = channel or {"source": "", "spreadsheet": "", "worksheet": "", "columns": DEFAULT_COLUMNS.copy()}
+        self.resize(720, 530)
+        self.panel = ChannelPanel(parent.root, parent.settings, channel or {"source": "", "spreadsheet": "", "worksheet": "", "columns": DEFAULT_COLUMNS.copy()})
+        self.closing = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(10)
         layout.addWidget(label("Канал и таблица", "title"))
-        layout.addWidget(label("Сервис должен иметь доступ к каналу и к выбранному листу.", "subtitle"))
-        form = QFormLayout()
-        form.setHorizontalSpacing(16)
-        form.setVerticalSpacing(8)
-        self.source = QLineEdit(str(item["source"]))
-        self.source.setPlaceholderText("https://t.me/channel, приглашение или @channel")
-        self.spreadsheet = QLineEdit(item["spreadsheet"])
-        self.spreadsheet.setPlaceholderText("https://docs.google.com/spreadsheets/d/...")
-        self.worksheet = QLineEdit(item["worksheet"])
-        self.worksheet.setPlaceholderText("Название вкладки внутри таблицы")
-        form.addRow("Telegram-канал", self.source)
-        form.addRow("Google-таблица", self.spreadsheet)
-        form.addRow("Вкладка", self.worksheet)
-        layout.addLayout(form)
-        group = QGroupBox("Сопоставление столбцов")
-        group_layout = QVBoxLayout(group)
-        group_layout.setContentsMargins(0, 4, 0, 0)
-        group_layout.setSpacing(8)
-        group_layout.addWidget(label("Укажите буквы существующих столбцов. Служебные поля будут скрыты.", "subtitle"))
-        self.columns = QTableWidget(len(DEFAULT_COLUMNS), 2)
-        self.columns.setHorizontalHeaderLabels(["Поле", "Столбец"])
-        self.columns.verticalHeader().setVisible(False)
-        self.columns.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.columns.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        for row, field in enumerate(DEFAULT_COLUMNS):
-            title = QTableWidgetItem(HEADERS[field])
-            title.setFlags(title.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.columns.setItem(row, 0, title)
-            self.columns.setItem(row, 1, QTableWidgetItem(item["columns"].get(field, DEFAULT_COLUMNS[field])))
-        group_layout.addWidget(self.columns)
-        layout.addWidget(group, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        buttons.accepted.connect(self.validate_and_accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        layout.addWidget(self.panel)
+        self.save_button = button("Сохранить", self.validate_and_accept, True)
+        layout.addWidget(self.save_button, alignment=Qt.AlignmentFlag.AlignRight)
+        self.panel.changed.connect(lambda: self.save_button.setEnabled(self.panel.checked and not self.panel.busy() and not self.closing))
+        self.save_button.setEnabled(False)
 
     def value(self):
-        return {"source": self.source.text().strip(), "spreadsheet": self.spreadsheet.text().strip(),
-                "worksheet": self.worksheet.text().strip(),
-                "columns": {field: self.columns.item(row, 1).text().strip().upper() if self.columns.item(row, 1) else ""
-                            for row, field in enumerate(DEFAULT_COLUMNS)}}
+        return self.panel.value()
 
     def validate_and_accept(self):
-        try:
-            item = self.value()
-            channel_source(item["source"])
-            spreadsheet_id(item["spreadsheet"])
-            if not item["worksheet"]:
-                raise ValueError("Укажите название вкладки Google-таблицы")
-            import re
-            columns = list(item["columns"].values())
-            if any(not re.fullmatch(r"[A-Z]{1,3}", col) for col in columns) or len(set(columns)) != len(columns):
-                raise ValueError("Укажите разные буквы столбцов, например A или AA")
-        except ValueError as exc:
-            QMessageBox.warning(self, "Проверьте настройки", str(exc))
+        if self.panel.checked and not self.panel.busy():
+            self.panel.validated_value()
+            self.accept()
+
+    def reject(self):
+        self.closing = True
+        self.panel.cancel()
+        if self.panel.busy():
+            self.save_button.setEnabled(False)
+            QTimer.singleShot(150, self.reject)
             return
-        self.accept()
+        super().reject()
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.reject()
 
 
 class MainWindow(QMainWindow):
@@ -212,9 +181,7 @@ class MainWindow(QMainWindow):
         self.root = root
         self.settings = settings
         self.worker = None
-        self.auth_worker = None
-        self.google_worker = None
-        self.qr_dialog = None
+        self.active_dialog = None
         self.exiting = False
         self.backfill_active = False
         self.service_failed = False
@@ -245,7 +212,6 @@ class MainWindow(QMainWindow):
             side.addWidget(item)
             self.nav.append(item)
         side.addStretch()
-        side.addWidget(label("Сбор через 24 часа", "subtitle"))
         outer.addWidget(sidebar)
         outer.addWidget(self.stack, 1)
         self.stack.addWidget(self.dashboard())
@@ -272,7 +238,7 @@ class MainWindow(QMainWindow):
         self.timer.start(10000)
         self.refresh_channels()
         self.refresh_dashboard()
-        if settings.get("start_service"):
+        if settings.get("setup_complete") or settings.get("start_service"):
             QTimer.singleShot(0, self.start_service)
         if background and self.tray.isSystemTrayAvailable():
             QTimer.singleShot(0, self.hide)
@@ -353,106 +319,62 @@ class MainWindow(QMainWindow):
         return page
 
     def settings_view(self):
-        page, layout = self.page("Настройки", "Авторизация и параметры работы")
-        from PySide6.QtWidgets import QScrollArea
+        page, layout = self.page("Настройки", "Подключения и запуск приложения")
+        from PySide6.QtWidgets import QScrollArea, QToolButton
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         content = QWidget()
         body = QVBoxLayout(content)
         body.setContentsMargins(0, 0, 8, 0)
-        body.setSpacing(10)
-        telegram_group = QGroupBox("Telegram")
-        form = QFormLayout(telegram_group)
-        form.setHorizontalSpacing(14)
-        form.setVerticalSpacing(7)
-        self.api_id = QLineEdit(str(self.settings.get("api_id", "")))
-        self.api_id.setPlaceholderText("Получите на my.telegram.org → API development tools")
-        self.api_hash = QLineEdit(self.settings.get("api_hash", ""))
-        self.api_hash.setEchoMode(QLineEdit.EchoMode.Password)
-        self.phone = QLineEdit(self.settings.get("phone", ""))
-        self.phone.setPlaceholderText("+7...")
-        self.code = QLineEdit()
-        self.code.setPlaceholderText("Код подтверждения")
-        self.password = QLineEdit()
-        self.password.setPlaceholderText("Пароль двухэтапной защиты")
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("API ID", self.api_id)
-        form.addRow("API hash", self.api_hash)
-        form.addRow("Телефон", self.phone)
-        auth_actions = QHBoxLayout()
-        self.auth_button = button("Получить код", self.start_auth, True)
-        self.qr_button = button("Войти по QR", self.start_qr)
-        self.check_telegram_button = button("Проверить подключение", self.check_telegram)
-        self.logout_button = button("Сменить аккаунт", self.logout_telegram)
-        auth_actions.addWidget(self.auth_button)
-        auth_actions.addWidget(self.qr_button)
-        auth_actions.addStretch()
-        form.addRow("", auth_actions)
-        self.cancel_auth_button = button("Отменить авторизацию", self.cancel_auth)
-        self.cancel_auth_button.setEnabled(False)
-        cancel_row = QHBoxLayout()
-        cancel_row.addWidget(self.check_telegram_button)
-        cancel_row.addWidget(self.logout_button)
-        cancel_row.addWidget(self.cancel_auth_button)
-        cancel_row.addStretch()
-        form.addRow("", cancel_row)
-        self.code_button = button("Подтвердить код", self.submit_code)
-        code_row = QHBoxLayout()
-        code_row.addWidget(self.code)
-        code_row.addWidget(self.code_button)
-        form.addRow("Код", code_row)
-        self.password_button = button("Подтвердить пароль", self.submit_password)
-        password_row = QHBoxLayout()
-        password_row.addWidget(self.password)
-        password_row.addWidget(self.password_button)
-        form.addRow("2FA", password_row)
-        self.code_button.setEnabled(False)
-        self.password_button.setEnabled(False)
-        self.auth_status = label("Код может прийти в служебный чат Telegram.", "subtitle")
-        form.addRow("", self.auth_status)
-        body.addWidget(telegram_group)
-        google_group = QGroupBox("Google Sheets")
-        google_form = QFormLayout(google_group)
-        google_form.setHorizontalSpacing(14)
-        google_form.setVerticalSpacing(7)
-        self.credentials_status = label(self.settings.get("credentials") or "JSON-файл не выбран", "subtitle")
-        google_form.addRow("Ключ", self.credentials_status)
-        self.google_channels = QComboBox()
-        google_form.addRow("Канал", self.google_channels)
-        google_actions = QHBoxLayout()
-        google_actions.addWidget(button("Выбрать JSON", self.choose_credentials))
-        self.google_button = button("Проверить доступ", self.check_google)
-        google_actions.addWidget(self.google_button)
-        google_actions.addStretch()
-        google_form.addRow("", google_actions)
-        google_form.addRow("", label("Откройте таблицу для email сервисного аккаунта с правом редактора.", "subtitle"))
-        body.addWidget(google_group)
-        options = QGroupBox("Сбор и запуск")
-        options_form = QFormLayout(options)
-        options_form.setHorizontalSpacing(14)
-        options_form.setVerticalSpacing(7)
+        body.setSpacing(12)
+        connections = QFormLayout()
+        self.telegram_summary = label("", "subtitle")
+        telegram_row = QHBoxLayout()
+        telegram_row.addWidget(self.telegram_summary, 1)
+        telegram_row.addWidget(button("Сменить аккаунт", self.change_telegram))
+        connections.addRow("Telegram", telegram_row)
+        self.credentials_status = label("", "subtitle")
+        google_row = QHBoxLayout()
+        google_row.addWidget(self.credentials_status, 1)
+        google_row.addWidget(button("Изменить ключ", self.change_google))
+        connections.addRow("Google Sheets", google_row)
+        body.addLayout(connections)
+        self.refresh_connection_labels()
+        options = QFormLayout()
+        self.timezone = QLineEdit(self.settings.get("timezone", "Europe/Moscow"))
+        self.autostart = QCheckBox("Открывать приложение вместе с Windows" if os.name == "nt" else "Открывать приложение при входе в систему")
+        self.autostart.setEnabled(os.name == "nt")
+        if sys.platform == "darwin":
+            self.autostart.setToolTip("Добавьте AnalyticsBot в Системные настройки → Основные → Объекты входа.")
+        self.autostart.setChecked(windows_autostart())
+        options.addRow("Часовой пояс", self.timezone)
+        options.addRow("", self.autostart)
+        body.addLayout(options)
+        body.addWidget(label("Мониторинг запускается автоматически при открытии настроенного приложения.", "subtitle"))
+        advanced_toggle = QToolButton()
+        advanced_toggle.setText("Дополнительные настройки")
+        advanced_toggle.setCheckable(True)
+        advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        body.addWidget(advanced_toggle)
+        advanced = QWidget()
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_form = QFormLayout()
         self.poll = self.spin(self.settings["poll_seconds"], 10, 86400)
         self.retry = self.spin(self.settings["retry_seconds"], 10, 86400)
         self.lookback = self.spin(self.settings["initial_lookback_hours"], 1, 8760)
-        self.timezone = QLineEdit(self.settings.get("timezone", "Europe/Moscow"))
-        self.start_service_box = QCheckBox("Запускать сбор при открытии приложения")
-        self.start_service_box.setChecked(bool(self.settings.get("start_service")))
-        self.autostart = QCheckBox("Открывать приложение вместе с Windows")
-        self.autostart.setEnabled(os.name == "nt")
-        self.autostart.setChecked(windows_autostart())
-        options_form.addRow("Опрос, секунд", self.poll)
-        options_form.addRow("Повтор, секунд", self.retry)
-        options_form.addRow("Первый поиск, часов", self.lookback)
-        options_form.addRow("Часовой пояс", self.timezone)
-        options_form.addRow("", self.start_service_box)
-        options_form.addRow("", self.autostart)
-        body.addWidget(options)
-        settings_actions = QHBoxLayout()
-        settings_actions.addWidget(button("Сохранить настройки", self.save_options, True))
-        settings_actions.addWidget(button("Импортировать данные сервиса", self.import_existing))
-        settings_actions.addStretch()
-        body.addLayout(settings_actions)
+        advanced_form.addRow("Проверка новых постов, сек.", self.poll)
+        advanced_form.addRow("Повтор после ошибки, сек.", self.retry)
+        advanced_form.addRow("История при первом запуске, ч.", self.lookback)
+        advanced_layout.addLayout(advanced_form)
+        advanced_layout.addWidget(label("Опрос определяет частоту поиска новых публикаций. Повтор — паузу после ошибки. История используется только при первом подключении канала. Статистика всегда собирается не раньше 24 часов после публикации.", "subtitle"))
+        advanced.hide()
+        advanced_toggle.toggled.connect(advanced.setVisible)
+        advanced_toggle.toggled.connect(lambda opened: advanced_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
+        body.addWidget(advanced)
+        body.addWidget(button("Сохранить настройки", self.save_options, True), alignment=Qt.AlignmentFlag.AlignLeft)
         body.addStretch()
         scroll.setWidget(content)
         layout.addWidget(scroll)
@@ -473,10 +395,8 @@ class MainWindow(QMainWindow):
         save_settings(self.root / "settings.json", self.settings)
 
     def collect_options(self):
-        self.settings.update(api_id=self.api_id.text().strip(), api_hash=self.api_hash.text().strip(),
-                             phone=self.phone.text().strip(), poll_seconds=self.poll.value(), retry_seconds=self.retry.value(),
-                             initial_lookback_hours=self.lookback.value(), timezone=self.timezone.text().strip(),
-                             start_service=self.start_service_box.isChecked())
+        self.settings.update(poll_seconds=self.poll.value(), retry_seconds=self.retry.value(),
+                             initial_lookback_hours=self.lookback.value(), timezone=self.timezone.text().strip())
 
     def save_options(self):
         try:
@@ -498,11 +418,6 @@ class MainWindow(QMainWindow):
             for col, value in enumerate((str(item["source"]), item["spreadsheet"], item["worksheet"])):
                 self.channels_table.setItem(row, col, QTableWidgetItem(value))
         self.channel_count.setText(f"Каналов: {len(channels)}")
-        current = self.google_channels.currentIndex()
-        self.google_channels.clear()
-        self.google_channels.addItems([str(item["source"]) for item in channels])
-        if channels:
-            self.google_channels.setCurrentIndex(min(max(current, 0), len(channels) - 1))
         self.update_channel_actions()
 
     def update_channel_actions(self):
@@ -512,20 +427,24 @@ class MainWindow(QMainWindow):
 
     def add_channel(self):
         dialog = ChannelDialog(self)
+        self.active_dialog = dialog
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings["channels"].append(dialog.value())
             self.persist()
             self.refresh_channels()
+        self.active_dialog = None
 
     def edit_channel(self):
         row = self.channels_table.currentRow()
         if row < 0:
             return
         dialog = ChannelDialog(self, self.settings["channels"][row])
+        self.active_dialog = dialog
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings["channels"][row] = dialog.value()
             self.persist()
             self.refresh_channels()
+        self.active_dialog = None
 
     def delete_channel(self):
         row = self.channels_table.currentRow()
@@ -537,211 +456,30 @@ class MainWindow(QMainWindow):
             self.persist()
             self.refresh_channels()
 
-    def choose_credentials(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Ключ сервисного аккаунта", "", "JSON (*.json)")
-        if not path:
-            return
-        try:
-            credentials = Credentials.from_service_account_file(path)
-            if not credentials.service_account_email:
-                raise ValueError("В файле нет email сервисного аккаунта")
-            destination = self.root / "google-service-account.json"
-            if Path(path).resolve() != destination.resolve():
-                shutil.copy2(path, destination)
-            self.settings["credentials"] = destination.name
-            self.credentials_status.setText(credentials.service_account_email)
-            self.persist()
-        except Exception as exc:
-            QMessageBox.warning(self, "Ключ Google", "Не удалось прочитать JSON-ключ сервисного аккаунта. Проверьте файл.")
 
-    def telegram_credentials(self):
-        self.collect_options()
-        try:
-            api_id = int(self.settings["api_id"])
-            if api_id < 1 or not self.settings["api_hash"]:
-                raise ValueError
-        except ValueError:
-            raise ValueError("Укажите Telegram API ID и API hash") from None
-        self.persist()
-        return api_id, self.settings["api_hash"]
+    def refresh_connection_labels(self):
+        account = (self.settings.get("telegram_account") or "Telegram") if self.settings.get("telegram_verified") else "Не подключён"
+        self.telegram_summary.setText(account)
+        self.credentials_status.setText(self.settings.get("google_email") or "Ключ не выбран")
 
-    def logout_telegram(self):
-        if QMessageBox.question(self, "Telegram", "Завершить сессию этого приложения и войти в другой аккаунт?") != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            api_id, api_hash = self.telegram_credentials()
-            self.launch_telegram(api_id, api_hash, None, logout=True)
-        except Exception as exc:
-            QMessageBox.warning(self, "Telegram", friendly_error(exc))
+    def change_telegram(self):
+        from .gui_setup import ConnectionDialog
+        dialog = ConnectionDialog(self.root, self.settings, "telegram")
+        self.active_dialog = dialog
+        dialog.exec()
+        self.active_dialog = None
+        self.refresh_connection_labels()
 
-    def start_auth(self):
-        if self.auth_worker and self.auth_worker.isRunning():
-            return
-        try:
-            api_id, api_hash = self.telegram_credentials()
-            if not self.settings["phone"].startswith("+"):
-                raise ValueError("Укажите номер в международном формате, например +7...")
-            self.launch_telegram(api_id, api_hash, self.settings["phone"])
-        except Exception as exc:
-            QMessageBox.warning(self, "Telegram", friendly_error(exc))
-
-    def check_telegram(self):
-        try:
-            api_id, api_hash = self.telegram_credentials()
-            self.launch_telegram(api_id, api_hash, None)
-        except Exception as exc:
-            QMessageBox.warning(self, "Telegram", friendly_error(exc))
-
-    def start_qr(self):
-        try:
-            api_id, api_hash = self.telegram_credentials()
-            self.launch_telegram(api_id, api_hash, None, qr_mode=True)
-        except Exception as exc:
-            QMessageBox.warning(self, "Telegram", friendly_error(exc))
-
-    def launch_telegram(self, api_id, api_hash, phone, logout=False, qr_mode=False):
-        if self.auth_worker and self.auth_worker.isRunning():
-            return
-        self.auth_worker = TelegramWorker(api_id, api_hash, str(self.root / "telegram"), str(self.root / "jobs.sqlite3"), phone, logout, qr_mode)
-        self.auth_worker.stage.connect(self.auth_stage)
-        self.auth_worker.qr_ready.connect(self.show_qr)
-        self.auth_worker.result.connect(self.auth_result)
-        self.auth_worker.finished.connect(self.auth_finished)
-        self.auth_button.setEnabled(False)
-        self.qr_button.setEnabled(False)
-        self.check_telegram_button.setEnabled(False)
-        self.logout_button.setEnabled(False)
-        self.cancel_auth_button.setEnabled(True)
-        self.auth_status.setText("Подключение к Telegram…")
-        self.auth_worker.start()
-
-    def auth_stage(self, stage, text):
-        self.auth_status.setText(text)
-        self.code_button.setEnabled(stage == "code")
-        self.password_button.setEnabled(stage == "password")
-        if stage == "password" and self.qr_dialog:
-            self.qr_dialog.hide()
-        if stage in ("code", "password"):
-            (self.code if stage == "code" else self.password).setFocus()
-
-    def show_qr(self, url):
-        import qrcode
-
-        code = qrcode.QRCode(border=4)
-        code.add_data(url)
-        matrix = code.get_matrix()
-        scale = 7
-        image = QImage(len(matrix) * scale, len(matrix) * scale, QImage.Format.Format_RGB32)
-        image.fill(QColor("white"))
-        painter = QPainter(image)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("black"))
-        for y, row in enumerate(matrix):
-            for x, value in enumerate(row):
-                if value:
-                    painter.drawRect(x * scale, y * scale, scale, scale)
-        painter.end()
-        if self.qr_dialog is None:
-            self.qr_dialog = QDialog(self)
-            self.qr_dialog.setWindowTitle("Вход в Telegram")
-            layout = QVBoxLayout(self.qr_dialog)
-            layout.addWidget(label("В Telegram откройте Настройки → Устройства → Подключить устройство."))
-            self.qr_image = QLabel()
-            self.qr_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(self.qr_image)
-            layout.addWidget(label("QR-код обновится автоматически. Не показывайте его другим.", "subtitle"))
-            layout.addWidget(button("Отменить", self.qr_dialog.reject))
-            self.qr_dialog.rejected.connect(lambda: self.auth_worker.cancel() if self.auth_worker and self.auth_worker.isRunning() else None)
-        self.qr_image.setPixmap(QPixmap.fromImage(image))
-        self.qr_dialog.adjustSize()
-        self.qr_dialog.show()
-        self.qr_dialog.raise_()
-
-    def submit_code(self):
-        if self.auth_worker and self.code.text().strip():
-            self.code_button.setEnabled(False)
-            self.auth_worker.answer(self.code.text().strip())
-            self.code.clear()
-
-    def cancel_auth(self):
-        if self.auth_worker and self.auth_worker.isRunning():
-            self.auth_worker.cancel()
-            self.auth_status.setText("Отмена авторизации…")
-
-    def submit_password(self):
-        if self.auth_worker and self.password.text():
-            self.password_button.setEnabled(False)
-            self.auth_worker.answer(self.password.text())
-            self.password.clear()
-
-    def auth_result(self, success, message):
-        self.auth_status.setText(message)
-        self.record_event(logging.INFO if success else logging.ERROR, message)
-
-    def auth_finished(self):
-        self.code_button.setEnabled(False)
-        self.password_button.setEnabled(False)
-        self.auth_button.setEnabled(True)
-        self.qr_button.setEnabled(True)
-        self.check_telegram_button.setEnabled(True)
-        self.logout_button.setEnabled(True)
-        self.cancel_auth_button.setEnabled(False)
-        if self.qr_dialog:
-            self.qr_dialog.hide()
-
-    def import_existing(self):
-        if self.auth_worker and self.auth_worker.isRunning():
-            QMessageBox.warning(self, "Импорт", "Сначала завершите авторизацию Telegram.")
-            return
-        directory = QFileDialog.getExistingDirectory(self, "Выберите папку существующего AnalyticsBot")
-        if not directory:
-            return
-        try:
-            self.settings = import_cli(Path(directory), self.root)
-            self.api_id.setText(str(self.settings["api_id"]))
-            self.api_hash.setText(self.settings["api_hash"])
-            self.phone.setText(self.settings["phone"])
-            self.credentials_status.setText(self.settings["credentials"])
-            self.poll.setValue(self.settings["poll_seconds"])
-            self.retry.setValue(self.settings["retry_seconds"])
-            self.lookback.setValue(self.settings["initial_lookback_hours"])
-            self.timezone.setText(self.settings["timezone"])
-            self.refresh_channels()
-            self.refresh_dashboard()
-            QMessageBox.information(self, "Импорт", "Настройки, очередь и доступные файлы авторизации импортированы.")
-        except Exception as exc:
-            QMessageBox.warning(self, "Импорт", friendly_error(exc))
-
-    def check_google(self):
-        if self.google_worker and self.google_worker.isRunning():
-            return
-        try:
-            self.collect_options()
-            if not self.settings["channels"]:
-                raise ValueError("Добавьте канал с таблицей для проверки")
-            credential = self.root / self.settings.get("credentials", "")
-            if not credential.is_file():
-                raise ValueError("Выберите JSON-ключ сервисного аккаунта")
-            first = self.settings["channels"][max(0, self.google_channels.currentIndex())]
-            channel = {"sheet": {"spreadsheet_id": spreadsheet_id(first["spreadsheet"]), "worksheet": first["worksheet"]}}
-            self.google_worker = GoogleWorker(str(credential), channel)
-            self.google_worker.result.connect(self.google_result)
-            self.google_worker.finished.connect(lambda: self.google_button.setEnabled(True))
-            self.google_button.setEnabled(False)
-            self.google_worker.start()
-        except Exception as exc:
-            QMessageBox.warning(self, "Google Sheets", friendly_error(exc))
-
-    def google_result(self, success, message):
-        self.record_event(logging.INFO if success else logging.ERROR, message)
-        if not self.exiting:
-            (QMessageBox.information if success else QMessageBox.warning)(self, "Google Sheets", message)
+    def change_google(self):
+        from .gui_setup import ConnectionDialog
+        dialog = ConnectionDialog(self.root, self.settings, "google")
+        self.active_dialog = dialog
+        dialog.exec()
+        self.active_dialog = None
+        self.refresh_connection_labels()
 
     def start_service(self):
         if self.worker and self.worker.isRunning():
-            return
-        if self.auth_worker and self.auth_worker.isRunning():
-            QMessageBox.warning(self, "Telegram", "Завершите авторизацию перед запуском сервиса.")
             return
         try:
             self.collect_options()
@@ -762,9 +500,6 @@ class MainWindow(QMainWindow):
         row = self.channels_table.currentRow()
         if row < 0:
             QMessageBox.information(self, "Дозагрузка", "Выберите канал в списке.")
-            return
-        if self.auth_worker and self.auth_worker.isRunning():
-            QMessageBox.warning(self, "Telegram", "Сначала завершите авторизацию.")
             return
         count, accepted = QInputDialog.getInt(self, "Дозагрузка постов", "Сколько последних постов старше 24 часов загрузить?", 10, 1, 10000)
         if not accepted:
@@ -873,11 +608,16 @@ class MainWindow(QMainWindow):
 
     def quit_app(self):
         self.exiting = True
+        if self.active_dialog is not None:
+            dialog = self.active_dialog
+            dialog.reject()
+            if dialog.panel.busy():
+                self.status.setText("Завершение подключения…")
+                QTimer.singleShot(150, self.quit_app)
+                return
         if self.worker and self.worker.isRunning():
             self.worker.stop()
-        if self.auth_worker and self.auth_worker.isRunning():
-            self.auth_worker.cancel()
-        if any(worker and worker.isRunning() for worker in (self.worker, self.auth_worker, self.google_worker)):
+        if self.worker and self.worker.isRunning():
             self.status.setText("Завершение работы…")
             QTimer.singleShot(300, self.quit_app)
             return
@@ -900,6 +640,10 @@ def main():
             build("sheets", "v4", credentials=AnonymousCredentials(), static_discovery=True)
             ZoneInfo("Europe/Moscow")
             with tempfile.TemporaryDirectory() as directory:
+                from .gui_setup import SetupWizard
+                wizard = SetupWizard(Path(directory), load_settings(Path(directory) / "settings.json"))
+                assert not wizard.next_button.isEnabled()
+                wizard.reject()
                 window = MainWindow(Path(directory), load_settings(Path(directory) / "settings.json"))
                 QTimer.singleShot(200, app.quit)
                 result = app.exec()
@@ -911,10 +655,18 @@ def main():
     try:
         root = data_dir()
         settings = load_settings(root / "settings.json")
-        window = MainWindow(root, settings, "--background" in sys.argv)
+        completed_now = False
+        if not settings.get("setup_complete"):
+            from .gui_setup import SetupWizard
+            wizard = SetupWizard(root, settings)
+            if wizard.exec() != QDialog.DialogCode.Accepted:
+                return 0
+            completed_now = True
+        background = "--background" in sys.argv and not completed_now
+        window = MainWindow(root, settings, background)
     except Exception as exc:
         QMessageBox.critical(None, "AnalyticsBot", f"Не удалось открыть приложение: {friendly_error(exc)}")
         return 1
-    if "--background" not in sys.argv or not QSystemTrayIcon.isSystemTrayAvailable():
+    if not background or not QSystemTrayIcon.isSystemTrayAvailable():
         window.show()
     return app.exec()

@@ -17,6 +17,14 @@ def friendly_error(exc):
         return "Telegram не принял API ID или API hash. Проверьте данные приложения."
     if isinstance(exc, errors.PhoneNumberInvalidError):
         return "Telegram не принял номер телефона. Укажите его в международном формате."
+    if isinstance(exc, errors.PhoneCodeExpiredError):
+        return "Код входа устарел. Запросите новый код или войдите по QR-коду."
+    if isinstance(exc, (errors.ChannelPrivateError, errors.InviteHashExpiredError, errors.InviteHashInvalidError)):
+        return "Нет доступа к каналу. Вступите в него этим Telegram-аккаунтом и проверьте ссылку-приглашение."
+    if isinstance(exc, (errors.UsernameInvalidError, errors.UsernameNotOccupiedError)):
+        return "Telegram-канал с таким адресом не найден. Скопируйте ссылку из Telegram и проверьте её."
+    if isinstance(exc, (errors.AuthKeyUnregisteredError, errors.SessionRevokedError)):
+        return "Сессия Telegram завершена. Откройте подключение Telegram и войдите заново."
     if isinstance(exc, errors.SessionPasswordNeededError):
         return "Требуется пароль двухэтапной защиты Telegram."
     if isinstance(exc, HttpError):
@@ -169,15 +177,24 @@ class TelegramWorker(QThread):
                     self.qr_ready.emit(qr.url)
                     self.stage.emit("qr", "Отсканируйте QR-код в Telegram: Настройки → Устройства → Подключить устройство.")
                     try:
-                        await qr.wait()
+                        me = await qr.wait()
                         break
                     except asyncio.TimeoutError:
                         continue
                     except errors.SessionPasswordNeededError:
                         if not await self._password(client):
                             return
+                        me = await client.get_me()
                         break
-                me = await client.get_me()
+                    except Exception:
+                        if not await client.is_user_authorized():
+                            raise
+                        me = await client.get_me()
+                        if not me:
+                            raise
+                        break
+                if not me:
+                    me = await client.get_me()
                 self.account.emit(f"{me.first_name or me.id}" + (f" (@{me.username})" if getattr(me, "username", None) else ""))
                 self.result.emit(True, f"Telegram подключён: {me.first_name or me.id}")
                 return

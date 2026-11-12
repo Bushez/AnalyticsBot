@@ -54,6 +54,7 @@ class SettingsTests(unittest.TestCase):
             source, destination = Path(directory) / "old", Path(directory) / "portable"
             (source / "data").mkdir(parents=True)
             destination.mkdir()
+            save_settings(destination / "settings.json", default_settings())
             (source / ".env").write_text("TELEGRAM_API_ID=123\nTELEGRAM_API_HASH=hash\nGOOGLE_APPLICATION_CREDENTIALS=key.json\n", encoding="utf-8")
             (source / "key.json").write_text("{}")
             config = {"channels": [{"source": "@channel", "sheet": {"spreadsheet_id": "sheet", "worksheet": "Tab", "columns": DEFAULT_COLUMNS}}]}
@@ -167,6 +168,21 @@ class GuiTests(unittest.TestCase):
             asyncio.run(worker._work())
         self.assertEqual(client.qr_login.await_count, 2)
         client.disconnect.assert_awaited_once()
+
+    def test_qr_auth_recovers_when_session_was_created_before_error(self):
+        from types import SimpleNamespace
+        from analyticsbot.gui_workers import TelegramWorker
+        worker = TelegramWorker(123, "hash", "test.session", "test.db", qr_mode=True)
+        qr = SimpleNamespace(url="tg://login?token=secret", wait=AsyncMock(side_effect=RuntimeError("login response failed")))
+        client = SimpleNamespace(connect=AsyncMock(), disconnect=AsyncMock(),
+                                 is_user_authorized=AsyncMock(side_effect=[False, True]),
+                                 qr_login=AsyncMock(return_value=qr),
+                                 get_me=AsyncMock(return_value=SimpleNamespace(first_name="Test", id=123)))
+        results = []
+        worker.result.connect(lambda success, message: results.append(success))
+        with patch("analyticsbot.gui_workers.TelegramClient", return_value=client):
+            asyncio.run(worker._work())
+        self.assertEqual(results, [True])
 
 
 if __name__ == "__main__":

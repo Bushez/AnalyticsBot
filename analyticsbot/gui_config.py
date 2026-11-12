@@ -23,6 +23,10 @@ DEFAULT_COLUMNS = {
 
 
 def data_dir():
+    if sys.platform == "darwin":
+        path = Path.home() / "Library" / "Application Support" / "AnalyticsBot"
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return path
     root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
     path = root / "user_data"
     path.mkdir(parents=True, exist_ok=True)
@@ -113,9 +117,13 @@ def runtime_config(settings, root):
 
 def import_cli(source, destination):
     source, destination = Path(source), Path(destination)
-    for name in ("settings.json", "jobs.sqlite3", "telegram.session", "google-service-account.json"):
+    for name in ("jobs.sqlite3", "telegram.session", "google-service-account.json"):
         if (destination / name).exists():
             raise ValueError("Импорт доступен только в пустую папку данных приложения")
+    if (destination / "settings.json").exists():
+        existing = load_settings(destination / "settings.json")
+        if any(existing.get(field) for field in ("api_id", "api_hash", "credentials", "channels")):
+            raise ValueError("Импортируйте старую конфигурацию до заполнения новых подключений.")
     config_path, env_path = source / "config.yaml", source / ".env"
     if not config_path.is_file() or not env_path.is_file():
         raise ValueError("В выбранной папке должны находиться config.yaml и .env")
